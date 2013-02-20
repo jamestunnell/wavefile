@@ -13,11 +13,12 @@ module WaveFile
     # starts, assuming this canonical format:
     #
     # RIFF Chunk Header (12 bytes)
-    # Format Chunk (No Extension) (16 bytes)
+    # Format Chunk (16 bytes for PCM, 18 bytes for floating point)
+    # FACT Chunk (0 bytes for PCM, 12 bytes for floating point)
     # Data Chunk Header (8 bytes)
     #
     # All wave files written by Writer use this canonical format.
-    CANONICAL_HEADER_BYTE_LENGTH = 36
+    CANONICAL_HEADER_BYTE_LENGTH = {:pcm => 36, :float => 50}
 
     MODE_WRITE = :modeWrite
     MODE_APPEND = :modeAppend
@@ -40,10 +41,8 @@ module WaveFile
       when MODE_WRITE
         @file = File.open(file_name, "wb")
         @format = format
-        @pack_code = PACK_CODES[@format.bits_per_sample]
         
-        @samples_existing = 0
-        @samples_written = 0
+        @sample_frames_existing = 0
   
         # Note that the correct sizes for the RIFF and data chunks can't be determined
         # until all samples have been written, so this header as written will be incorrect.
@@ -55,14 +54,15 @@ module WaveFile
         
         @file = File.open(@file_name, "ab+")
         @format = Format.new(info.channels, info.bits_per_sample, info.sample_rate)
-        @pack_code = PACK_CODES[@format.bits_per_sample]
         
-        @samples_existing = info.sample_count
-        @samples_written = 0
+        @sample_frames_existing = info.sample_frame_count
       else
         raise ArgumentError, "mode #{mode} is not supported"
       end
       
+      @pack_code = PACK_CODES[@format.sample_format][@format.bits_per_sample]
+      @sample_frames_written = 0
+
       if block_given?
         begin
           yield(self)
@@ -80,7 +80,7 @@ module WaveFile
     def write(buffer)
       samples = buffer.convert(@format).samples
       @file.syswrite(samples.flatten.pack(@pack_code))
-      @samples_written += samples.length
+      @sample_frames_written += samples.length
     end
 
 
@@ -104,7 +104,7 @@ module WaveFile
       # written, write an empty padding byte.
       #
       # See http://www-mmsp.ece.mcgill.ca/Documents/AudioFormats/WAVE/Docs/riffmci.pdf, page 11.
-      bytes_written = total_samples * @format.block_align
+      bytes_written = total_sample_frames * @format.block_align
       if bytes_written.odd?
         @file.syswrite(EMPTY_BYTE)
       end
@@ -120,17 +120,17 @@ module WaveFile
       # samples have been written, so go back to the beginning of the file and re-write
       # those chunk headers with the correct sizes.
       @file.sysseek(0)
-      write_header(total_samples)
+      write_header(total_sample_frames)
 
       @file.close
     end
 
     def duration_written
-      Duration.new(@samples_written, @format.sample_rate)
+      Duration.new(@sample_frames_written, @format.sample_rate)
     end
     
     def duration_total
-      Duration.new(total_samples, @format.sample_rate)
+      Duration.new(total_sample_frames, @format.sample_rate)
     end
 
     # Returns the name of the Wave file that is being written to
@@ -140,41 +140,49 @@ module WaveFile
     # format and bits per sample, sample rate, etc.)
     attr_reader :format
 
-    # Returns the number of samples (per channel) that have been written to the file since opening.
-    # If appending to an existing file, total_samples will include existing sample count (per channel)
-    # as well.
+    # Returns the number of samples (per channel) that have been written to the file so far (since opening).
     # For example, if 1000 "left" samples and 1000 "right" samples have been written to a stereo file
     # since it was opened, this will return 1000.
-    attr_reader :samples_written
+    attr_reader :sample_frames_written
 
     # Returns the number of samples (per channel) contained in the file in total, including existing
     # samples (before file was opened) and those that were written after opening.
     # For example, if 1000 L/R samples exisited in a stereo file before it was opened, and 1000 L/R
     # samples have been written since it was opened, this will return 2000.
-    def total_samples
-      @samples_existing + @samples_written
+    def total_sample_frames
+      @sample_frames_existing + @sample_frames_written
     end
     
   private
     # Writes the RIFF chunk header, format chunk, and the header for the data chunk. After this
     # method is called the file will be "queued up" and ready for writing actual sample data.
-    def write_header(sample_count)
-      sample_data_byte_count = sample_count * @format.block_align
+    def write_header(sample_frame_count)
+      sample_data_byte_count = sample_frame_count * @format.block_align
 
       # Write the header for the RIFF chunk
       header = CHUNK_IDS[:riff]
-      header += [CANONICAL_HEADER_BYTE_LENGTH + sample_data_byte_count].pack(UNSIGNED_INT_32)
+      header += [CANONICAL_HEADER_BYTE_LENGTH[@format.sample_format] + sample_data_byte_count].pack(UNSIGNED_INT_32)
       header += WAVEFILE_FORMAT_CODE
 
       # Write the format chunk
       header += CHUNK_IDS[:format]
-      header += [FORMAT_CHUNK_BYTE_LENGTH].pack(UNSIGNED_INT_32)
-      header += [PCM].pack(UNSIGNED_INT_16)
+      header += [FORMAT_CHUNK_BYTE_LENGTH[@format.sample_format]].pack(UNSIGNED_INT_32)
+      header += [FORMAT_CODES[@format.sample_format]].pack(UNSIGNED_INT_16)
       header += [@format.channels].pack(UNSIGNED_INT_16)
       header += [@format.sample_rate].pack(UNSIGNED_INT_32)
       header += [@format.byte_rate].pack(UNSIGNED_INT_32)
       header += [@format.block_align].pack(UNSIGNED_INT_16)
       header += [@format.bits_per_sample].pack(UNSIGNED_INT_16)
+      if @format.sample_format == :float
+        header += [0].pack(UNSIGNED_INT_16)
+      end
+
+      # Write the FACT chunk, if necessary
+      unless @format.sample_format == :pcm
+        header += CHUNK_IDS[:fact]
+        header += [4].pack(UNSIGNED_INT_32)
+        header += [sample_frame_count].pack(UNSIGNED_INT_32)
+      end
 
       # Write the header for the data chunk
       header += CHUNK_IDS[:data]
