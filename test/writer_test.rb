@@ -171,8 +171,27 @@ class WriterTest < Test::Unit::TestCase
       end
     end
     
-    reader = Reader.new("#{OUTPUT_FOLDER}/exception_with_block.wav")
-    assert_equal(samples.size, reader.samples_remaining)
+    Reader.new("#{OUTPUT_FOLDER}/exception_with_block.wav") do |reader|
+      assert_equal(samples.size, reader.samples_remaining)
+    end
+  end
+  
+  def test_append_mode
+    format = Format.new(1, 8, 44100)
+    samples = [1, 2, 3, 4, 5, 6]
+    filename = "append_mode.wav"
+    
+    Writer.new("#{OUTPUT_FOLDER}/#{filename}", format) do |writer|
+      writer.write(Buffer.new(samples[0...(samples.size / 2)], writer.format))
+    end
+
+    Writer.new("#{OUTPUT_FOLDER}/#{filename}", format, Writer::MODE_APPEND) do |writer|
+      writer.write(Buffer.new(samples[(samples.size / 2)...samples.size], writer.format))
+    end
+    
+    Reader.new("#{OUTPUT_FOLDER}/#{filename}") do |reader|
+      assert_equal(samples.size, reader.samples_remaining)
+    end
   end
 
 private
